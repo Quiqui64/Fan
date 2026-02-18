@@ -1,0 +1,405 @@
+// =======================
+//  ESP32-C6 Hampton Bay RF + Matter
+//  Single Fan+Light: DIP 1011 (Family Room)
+//  IRremoteESP8266 RAW, GPIO 4, NVS persistence
+// =======================
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <Preferences.h>
+
+#include <BH1750.h>
+#include <Matter.h>
+
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+
+// ---------- WiFi ----------
+const char *ssid     = "YOUR_SSID";
+const char *password = "YOUR_PASSWORD";
+
+// ---------- RF / RAW driver ----------
+const uint16_t kIrLed      = 4;   // GPIO 4 → RF TX module
+static const uint8_t RF_REPEAT   = 20;
+static const uint8_t RAW_LEN     = 44;
+static const uint8_t CARRIER_KHZ = 38;
+
+IRsend irsend(kIrLed);
+
+// ---------- BH1750 (optional, can be left connected or ignored) ----------
+BH1750 lightMeter;
+static const uint8_t I2C_SDA = 21;
+static const uint8_t I2C_SCL = 22;
+
+// ---------- Matter endpoints ----------
+MatterFan   Fan1011;
+MatterLight Light1011;
+MatterIlluminanceSensor LuxEndpoint;   // if your Matter lib exposes this
+
+// ---------- NVS ----------
+Preferences fanPrefs;
+
+// ---------- Fan ID ----------
+enum FanID {
+  FAN_1011,
+  FAN_COUNT
+};
+
+enum FanSpeed { SPEED_OFF, SPEED_LOW, SPEED_MED, SPEED_HIGH };
+
+// ---------- RAW waveforms for DIP 1011 (Family Room) ----------
+// Directly from your ESP8266 sketch
+
+const unsigned int lightOffFanOff[] PROGMEM = {329,329,664,329,664,329,664,329,664,329,664,664,329,329,664,329,664,329,664,329,664,329,664,329,664,329,664,329,664,329,664,329,664,329,664,329,664,664,329,329,664,329,664,10044};
+const unsigned int lightOffFanLow[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,330,663,330,663,330,663,330,663,663,330,663,330,330,663,330,663,663,330,663,330,663,330,10028};
+const unsigned int lightOffFanMed[] PROGMEM = {329,329,663,329,663,329,663,329,663,329,663,663,329,329,663,329,663,329,663,329,663,329,663,329,663,329,663,329,663,663,329,329,663,329,663,329,663,663,329,663,329,329,663,10028};
+const unsigned int lightOffFanHigh[] PROGMEM = {329,329,663,329,663,329,663,329,663,329,663,663,329,329,663,329,663,329,663,329,663,329,663,329,663,329,663,329,663,329,663,663,329,329,663,329,663,663,329,329,663,663,329,10026};
+
+const unsigned int light20FanOff[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,663,330,330,663,663,330,330,663,330,663,663,330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,10051};
+const unsigned int light20FanLow[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,663,330,330,663,663,330,330,663,330,663,663,330,663,330,663,330,330,663,330,663,663,330,330,663,663,330,10045};
+const unsigned int light20FanMed[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,663,330,330,663,663,330,330,663,330,663,663,330,663,330,330,663,330,663,330,663,663,330,330,663,330,663,10041};
+const unsigned int light20FanHigh[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,663,330,330,663,663,330,330,663,330,663,663,330,330,663,663,330,330,663,330,663,330,663,663,330,663,330,10041};
+
+const unsigned int light30FanOff[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,663,330,330,663,330,663,663,330,330,663,330,663,330,663,330,663,330,663,663,330,663,330,330,663,663,330,10041};
+const unsigned int light30FanLow[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,663,330,330,663,330,663,663,330,330,663,330,663,663,330,663,330,330,663,330,663,330,663,330,663,330,663,10053};
+const unsigned int light30FanMed[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,663,330,330,663,330,663,663,330,330,663,330,663,663,330,330,663,330,663,663,330,663,330,663,330,663,330,10041};
+const unsigned int light30FanHigh[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,663,330,330,663,330,663,663,330,330,663,330,663,330,663,663,330,330,663,663,330,663,330,663,330,330,663,10034};
+
+const unsigned int light40FanOff[] PROGMEM = {331,331,662,331,662,331,662,331,662,331,662,662,331,331,662,331,662,331,662,662,331,662,331,662,331,662,331,662,331,331,662,331,662,331,662,331,662,662,331,662,331,662,331,10036};
+const unsigned int light40FanLow[] PROGMEM = {331,331,662,331,662,331,662,331,662,331,662,662,331,331,662,331,662,331,662,662,331,662,331,662,331,662,331,662,331,662,331,662,331,331,662,662,331,331,662,662,331,331,662,10041};
+const unsigned int light40FanMed[] PROGMEM = {331,331,662,331,662,331,662,331,662,331,662,662,331,331,662,331,662,331,662,662,331,662,331,662,331,662,331,662,331,662,331,331,662,331,662,662,331,331,662,331,662,662,331,10041};
+const unsigned int light40FanHigh[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,663,330,663,330,663,330,663,330,663,330,330,663,663,330,330,663,663,330,330,663,330,663,330,663,10053};
+
+const unsigned int light50FanOff[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,663,330,663,330,330,663,663,330,330,663,330,663,330,663,330,663,330,663,330,663,663,330,330,663,10041};
+const unsigned int light50FanLow[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,663,330,663,330,330,663,663,330,330,663,663,330,663,330,330,663,330,663,663,330,330,663,663,330,10041};
+const unsigned int light50FanMed[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,663,330,663,330,330,663,663,330,330,663,663,330,330,663,330,663,330,663,663,330,330,663,330,663,10048};
+const unsigned int light50FanHigh[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,663,330,663,330,330,663,663,330,330,663,330,663,663,330,330,663,330,663,330,663,663,330,663,330,10052};
+
+const unsigned int light60FanOff[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,663,330,330,663,663,330,330,663,663,330,330,663,330,663,330,663,663,330,663,330,330,663,663,330,10039};
+const unsigned int light60FanLow[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,663,330,330,663,663,330,330,663,663,330,663,330,663,330,330,663,330,663,330,663,330,663,330,663,10034};
+const unsigned int light60FanMed[] PROGMEM = {331,331,662,331,662,331,662,331,662,331,662,662,331,331,662,331,662,331,662,662,331,331,662,662,331,331,662,662,331,662,331,331,662,331,662,662,331,662,331,662,331,662,331,10039};
+const unsigned int light60FanHigh[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,663,330,330,663,663,330,330,663,663,330,330,663,663,330,330,663,663,330,663,330,663,330,330,663,10056};
+
+const unsigned int light70FanOff[] PROGMEM = {329,329,664,329,664,329,664,329,664,329,664,664,329,329,664,329,664,329,664,664,329,329,664,329,664,329,664,329,664,329,664,329,664,329,664,664,329,329,664,329,664,329,664,10039};
+const unsigned int light70FanLow[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,663,330,663,330,330,663,663,330,330,663,663,330,663,330,10039};
+const unsigned int light70FanMed[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,663,330,330,663,330,663,663,330,330,663,663,330,330,663,10049};
+const unsigned int light70FanHigh[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,663,330,330,663,330,663,663,330,10049};
+
+const unsigned int light80FanOff[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,663,330,330,663,663,330,663,330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,10047};
+const unsigned int light80FanLow[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,663,330,330,663,663,330,663,330,663,330,663,330,330,663,330,663,663,330,330,663,663,330,10049};
+const unsigned int light80FanMed[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,663,330,330,663,663,330,663,330,663,330,330,663,330,663,330,663,663,330,330,663,330,663,10047};
+const unsigned int light80FanHigh[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,663,330,330,663,663,330,663,330,330,663,663,330,330,663,330,663,330,663,663,330,663,330,10045};
+
+const unsigned int light90FanOff[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,330,663,663,330,663,330,330,663,330,663,330,663,330,663,663,330,663,330,330,663,663,330,10054};
+const unsigned int light90FanLow[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,330,663,663,330,663,330,330,663,663,330,663,330,330,663,330,663,330,663,330,663,330,663,10034};
+const unsigned int light90FanMed[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,330,663,663,330,663,330,330,663,663,330,330,663,330,663,663,330,663,330,663,330,663,330,10037};
+const unsigned int light90FanHigh[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,330,663,663,330,663,330,330,663,330,663,663,330,330,663,663,330,663,330,663,330,330,663,10043};
+
+const unsigned int light100FanOff[] PROGMEM = {329,329,664,329,664,329,664,329,664,329,664,664,329,329,664,329,664,329,664,329,664,329,664,329,664,329,664,664,329,329,664,329,664,329,664,664,329,329,664,329,664,329,664,10041};
+const unsigned int light100FanLow[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,330,663,330,663,330,663,663,330,663,330,663,330,330,663,663,330,330,663,663,330,663,330,10045};
+const unsigned int light100FanMed[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,330,663,330,663,330,663,663,330,663,330,330,663,330,663,663,330,330,663,663,330,330,663,10043};
+const unsigned int light100FanHigh[] PROGMEM = {330,330,663,330,663,330,663,330,663,330,663,663,330,330,663,330,663,330,663,330,663,330,663,330,663,330,663,663,330,330,663,663,330,330,663,663,330,330,663,330,663,663,330,10045};
+
+// ---------- Waveform table for FAN_1011 ----------
+
+struct FanWaveforms {
+  const unsigned int *lightOff[4];
+  const unsigned int *light20[4];
+  const unsigned int *light30[4];
+  const unsigned int *light40[4];
+  const unsigned int *light50[4];
+  const unsigned int *light60[4];
+  const unsigned int *light70[4];
+  const unsigned int *light80[4];
+  const unsigned int *light90[4];
+  const unsigned int *light100[4];
+};
+
+const FanWaveforms fan1011 = {
+  // lightOff
+  { lightOffFanOff,  lightOffFanLow,  lightOffFanMed,  lightOffFanHigh },
+  // light20
+  { light20FanOff,   light20FanLow,   light20FanMed,   light20FanHigh },
+  // light30
+  { light30FanOff,   light30FanLow,   light30FanMed,   light30FanHigh },
+  // light40
+  { light40FanOff,   light40FanLow,   light40FanMed,   light40FanHigh },
+  // light50
+  { light50FanOff,   light50FanLow,   light50FanMed,   light50FanHigh },
+  // light60
+  { light60FanOff,   light60FanLow,   light60FanMed,   light60FanHigh },
+  // light70
+  { light70FanOff,   light70FanLow,   light70FanMed,   light70FanHigh },
+  // light80
+  { light80FanOff,   light80FanLow,   light80FanMed,   light80FanHigh },
+  // light90
+  { light90FanOff,   light90FanLow,   light90FanMed,   light90FanHigh },
+  // light100
+  { light100FanOff,  light100FanLow,  light100FanMed,  light100FanHigh }
+};
+
+const FanWaveforms Fans[FAN_COUNT] = {
+  fan1011
+};
+
+// ---------- Your original RAW sender (unchanged semantics) ----------
+
+void sendRAW_Flash(const unsigned int *signalArray,
+                   unsigned int signalLength,
+                   unsigned char carrierFreqKHz) {
+  irsend.enableIROut(carrierFreqKHz);
+  for (unsigned int i = 0; i < signalLength; i++) {
+    if (i & 1) {
+      irsend.space(pgm_read_word_near(&signalArray[i]));
+    } else {
+      irsend.mark(pgm_read_word_near(&signalArray[i]));
+    }
+  }
+  irsend.space(1);
+}
+
+// ---------- Brightness mapping (0–100% → 11 states) ----------
+
+int brightnessToIndex(uint8_t brightness) {
+  if (brightness == 0) return 0;   // off
+  if (brightness <= 20) return 1;
+  if (brightness <= 30) return 2;
+  if (brightness <= 40) return 3;
+  if (brightness <= 50) return 4;
+  if (brightness <= 60) return 5;
+  if (brightness <= 70) return 6;
+  if (brightness <= 80) return 7;
+  if (brightness <= 90) return 8;
+  return 9; // 100%
+}
+
+// ---------- Master RF function (called from loop, not callbacks) ----------
+
+void sendFanCommand(FanID id, FanSpeed speed, uint8_t brightness) {
+  int bIndex = brightnessToIndex(brightness);
+  const unsigned int *wave = nullptr;
+
+  switch (bIndex) {
+    case 0: wave = Fans[id].lightOff[speed];   break;
+    case 1: wave = Fans[id].light20[speed];    break;
+    case 2: wave = Fans[id].light30[speed];    break;
+    case 3: wave = Fans[id].light40[speed];    break;
+    case 4: wave = Fans[id].light50[speed];    break;
+    case 5: wave = Fans[id].light60[speed];    break;
+    case 6: wave = Fans[id].light70[speed];    break;
+    case 7: wave = Fans[id].light80[speed];    break;
+    case 8: wave = Fans[id].light90[speed];    break;
+    case 9: wave = Fans[id].light100[speed];   break;
+  }
+
+  if (!wave) return;
+
+  for (uint8_t i = 0; i < RF_REPEAT; i++) {
+    sendRAW_Flash(wave, RAW_LEN, CARRIER_KHZ);
+    delay(5);
+  }
+}
+
+// ---------- Per-fan state + NVS ----------
+
+struct FanState {
+  FanID id;
+  bool  on;
+  uint8_t speedPercent;    // 0–100
+  uint8_t brightness;      // 0–100
+};
+
+FanState fanStates[FAN_COUNT] = {
+  { FAN_1011, false, 0, 0 }
+};
+
+const char *fanKey(FanID id) {
+  switch (id) {
+    case FAN_1011: return "fan_1011";
+    default:       return "fan_unk";
+  }
+}
+
+void saveFanStateToNVS(const FanState &st) {
+  fanPrefs.begin("fan_state", false);  // RW
+  const char *key = fanKey(st.id);
+  fanPrefs.putBool(String(key) + "_on",  st.on);
+  fanPrefs.putUChar(String(key) + "_spd", st.speedPercent);
+  fanPrefs.putUChar(String(key) + "_bri", st.brightness);
+  fanPrefs.end();
+}
+
+void loadFanStateFromNVS(FanState &st) {
+  fanPrefs.begin("fan_state", true);   // RO
+  const char *key = fanKey(st.id);
+  st.on           = fanPrefs.getBool(String(key) + "_on", false);
+  st.speedPercent = fanPrefs.getUChar(String(key) + "_spd", 0);
+  st.brightness   = fanPrefs.getUChar(String(key) + "_bri", 0);
+  fanPrefs.end();
+}
+
+FanSpeed speedFromPercent(uint8_t p) {
+  if (p == 0) return SPEED_OFF;
+  if (p <= 33) return SPEED_LOW;
+  if (p <= 66) return SPEED_MED;
+  return SPEED_HIGH;
+}
+
+// ---------- Single-slot RF queue (last command wins) ----------
+
+struct PendingRF {
+  bool valid;
+  FanState stateSnapshot;
+};
+
+volatile bool rfPending = false;
+PendingRF pendingRF;
+
+// Called from loop() only
+void applyFanState(const FanState &st) {
+  FanSpeed spd = st.on ? speedFromPercent(st.speedPercent) : SPEED_OFF;
+  uint8_t brightness = st.brightness;
+
+  // 1) Send RF
+  sendFanCommand(st.id, spd, brightness);
+
+  // 2) Persist state AFTER successful RF send
+  saveFanStateToNVS(st);
+}
+
+// ---------- Setup one fan+light pair with Matter callbacks ----------
+
+void setupFanLightEndpoints(MatterFan &fanEP,
+                            MatterLight &lightEP,
+                            FanState &st) {
+  // st has already been loaded from NVS before this is called
+  uint8_t initSpeed = st.on ? st.speedPercent : 0;
+  fanEP.begin(initSpeed,
+              st.on ? MatterFan::FAN_MODE_LOW : MatterFan::FAN_MODE_OFF,
+              MatterFan::FAN_MODE_SEQ_OFF_HIGH);
+
+  bool lightOn = (st.brightness > 0);
+  lightEP.begin(lightOn, st.brightness);
+
+  fanEP.onChangeSpeedPercent([&](uint8_t speedPercent) {
+    if (speedPercent == MatterFan::OFF_SPEED &&
+        fanEP.getMode() != MatterFan::FAN_MODE_OFF) {
+      return fanEP.setOnOff(false, fanEP.ATTR_SET);
+    }
+    if (speedPercent > MatterFan::OFF_SPEED &&
+        fanEP.getMode() == MatterFan::FAN_MODE_OFF) {
+      return fanEP.setOnOff(true, fanEP.ATTR_SET);
+    }
+    st.speedPercent = speedPercent;
+    st.on = (speedPercent > 0);
+
+    pendingRF.stateSnapshot = st;
+    pendingRF.valid = true;
+    rfPending = true;
+
+    return true;
+  });
+
+  fanEP.onChangeMode([&](MatterFan::FanMode_t fanMode) {
+    if (fanEP.getSpeedPercent() == MatterFan::OFF_SPEED &&
+        fanMode != MatterFan::FAN_MODE_OFF) {
+      return fanEP.setSpeedPercent(50, fanEP.ATTR_SET);
+    }
+    return true;
+  });
+
+  fanEP.onChange([&](MatterFan::FanMode_t fanMode, uint8_t speedPercent) {
+    st.on = (fanMode != MatterFan::FAN_MODE_OFF);
+    st.speedPercent = speedPercent;
+
+    pendingRF.stateSnapshot = st;
+    pendingRF.valid = true;
+    rfPending = true;
+
+    return true;
+  });
+
+  lightEP.onChange([&](bool on, uint8_t level) {
+    st.brightness = on ? level : 0;
+
+    pendingRF.stateSnapshot = st;
+    pendingRF.valid = true;
+    rfPending = true;
+
+    return true;
+  });
+}
+
+// ---------- Setup ----------
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  irsend.begin();
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+  lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE);
+
+#if !CONFIG_ENABLE_CHIPOBLE
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected");
+  Serial.println(WiFi.localIP());
+#endif
+
+  // Load persisted state for FAN_1011
+  loadFanStateFromNVS(fanStates[FAN_1011]);
+
+  // Wire Matter endpoints to this state
+  setupFanLightEndpoints(Fan1011, Light1011, fanStates[FAN_1011]);
+
+  LuxEndpoint.begin();
+
+  Matter.begin();
+  if (Matter.isDeviceCommissioned()) {
+    Serial.println("Matter Node commissioned and ready.");
+  }
+
+  pendingRF.valid = false;
+  rfPending = false;
+}
+
+// ---------- Loop ----------
+
+void loop() {
+  if (!Matter.isDeviceCommissioned()) {
+    Serial.println("Matter Node not commissioned yet.");
+    Serial.printf("Manual pairing code: %s\n", Matter.getManualPairingCode().c_str());
+    Serial.printf("QR code URL: %s\n", Matter.getOnboardingQRCodeUrl().c_str());
+    uint32_t timeCount = 0;
+    while (!Matter.isDeviceCommissioned()) {
+      delay(100);
+      if ((timeCount++ % 50) == 0) {
+        Serial.println("Waiting for commissioning...");
+      }
+    }
+    Serial.println("Matter Node commissioned and ready.");
+  }
+
+  // Single-slot RF queue: last command wins
+  if (rfPending && pendingRF.valid) {
+    FanState snapshot = pendingRF.stateSnapshot;
+    pendingRF.valid = false;
+    rfPending = false;
+    applyFanState(snapshot);
+  }
+
+  static unsigned long lastLux = 0;
+  if (millis() - lastLux > 60000) {
+    lastLux = millis();
+    float lux = lightMeter.readLightLevel();
+    LuxEndpoint.setIlluminance(lux);
+  }
+}
